@@ -43,7 +43,13 @@ class Run(Base):
     source: Mapped[str] = mapped_column(String(64), index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Rows written this run. Goes to zero once a source stops changing.
     items_stored: Mapped[int] = mapped_column(Integer, default=0)
+    # Records parsed this run, new or not. This is the yield figure, and the
+    # one the baseline is built from. Using items_stored here was wrong: a
+    # stable source dedups to zero new rows and the baseline never forms,
+    # silently disabling yield monitoring on exactly the sources it suits best.
+    items_seen: Mapped[int] = mapped_column(Integer, default=0)
     items_rejected: Mapped[int] = mapped_column(Integer, default=0)
     pages_fetched: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(16), default="running")
@@ -89,9 +95,21 @@ def init_db(engine) -> None:
     Base.metadata.create_all(engine)
 
 
+# Fields that describe the observation rather than the thing observed. They
+# change on every run by definition, so hashing them would make the fingerprint
+# unique every time and defeat its only purpose.
+VOLATILE_FIELDS = frozenset({"scraped_at"})
+
+
 def fingerprint(payload: dict) -> str:
-    """Stable hash of an item, so re-runs do not create duplicates."""
-    canonical = json.dumps(payload, sort_keys=True, default=str)
+    """Stable hash identifying the record itself, across runs.
+
+    Excludes run metadata. Including `scraped_at` here was a real bug: the hash
+    changed on every run, no duplicate was ever detected, and the same record
+    accumulated a new row each time.
+    """
+    stable = {k: v for k, v in payload.items() if k not in VOLATILE_FIELDS}
+    canonical = json.dumps(stable, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -140,6 +158,7 @@ class Repository:
         run_id: str,
         *,
         items_stored: int,
+        items_seen: int,
         items_rejected: int,
         pages_fetched: int,
         status: str,
@@ -152,6 +171,7 @@ class Repository:
                 return
             run.finished_at = datetime.now(UTC)
             run.items_stored = items_stored
+            run.items_seen = items_seen
             run.items_rejected = items_rejected
             run.pages_fetched = pages_fetched
             run.status = status
@@ -160,15 +180,28 @@ class Repository:
             s.commit()
 
     def store_items(self, run_id: str, items: Iterable[ScrapedItem]) -> int:
+        """Store items, skipping records already seen for this source.
+
+        Returns the number of rows written. A run that finds nothing new
+        returns 0 here while still reporting its full item count to the drift
+        monitor, because "nothing changed" and "the scraper broke" must not
+        look the same.
+        """
         stored = 0
         with Session(self.engine) as s:
             for item in items:
                 payload = item.model_dump(mode="json")
+                fp = fingerprint(payload)
+                exists = s.scalar(
+                    select(Item.id).where(Item.source == item.source, Item.fingerprint == fp)
+                )
+                if exists is not None:
+                    continue
                 s.add(
                     Item(
                         run_id=run_id,
                         source=item.source,
-                        fingerprint=fingerprint(payload),
+                        fingerprint=fp,
                         payload=payload,
                         scraped_at=item.scraped_at,
                     )
@@ -196,7 +229,12 @@ class Repository:
         return count
 
     def recent_yields(self, source: str, limit: int) -> Sequence[int]:
-        """Item counts from the most recent healthy runs, newest first."""
+        """Records seen per run across recent healthy runs, newest first.
+
+        Deliberately `items_seen` rather than `items_stored`: the question is
+        whether the scraper still extracts what it used to, not whether the
+        source published anything new.
+        """
         with Session(self.engine) as s:
             rows = s.scalars(
                 select(Run)
@@ -204,7 +242,7 @@ class Repository:
                 .order_by(Run.id.desc())
                 .limit(limit)
             ).all()
-        return [r.items_stored for r in rows]
+        return [r.items_seen for r in rows]
 
     def last_success(self, source: str) -> datetime | None:
         with Session(self.engine) as s:

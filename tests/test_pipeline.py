@@ -111,3 +111,60 @@ class TestMultiPage:
         result = pipe.run(StubSpider("books_page_ok.html", pages=3))
         assert result.pages == 3
         assert result.stored == 15
+
+
+class TestDeduplication:
+    """Re-running must not duplicate rows, and must not blind the monitor.
+
+    These two pull against each other, which is how the original bug happened:
+    the fix for duplicates silently disabled yield monitoring.
+    """
+
+    def test_identical_reruns_do_not_duplicate_rows(self, pipeline):
+        pipe, _ = pipeline
+        first = pipe.run(StubSpider("books_page_ok.html"))
+        second = pipe.run(StubSpider("books_page_ok.html"))
+        assert first.stored == 5
+        assert second.stored == 0  # nothing new written
+
+    def test_but_the_run_still_reports_what_it_saw(self, pipeline):
+        pipe, _ = pipeline
+        pipe.run(StubSpider("books_page_ok.html"))
+        second = pipe.run(StubSpider("books_page_ok.html"))
+        assert second.seen == 5  # the scraper is working
+        assert second.ok
+
+    def test_baseline_survives_a_fully_deduplicated_source(self, pipeline):
+        # The regression this guards: with the baseline built from rows written,
+        # a stable source scores zero every run, no baseline ever forms, and
+        # yield monitoring is quietly switched off forever.
+        pipe, repo = pipeline
+        for _ in range(3):
+            pipe.run(StubSpider("books_page_ok.html"))
+        assert repo.recent_yields("books", 5) == [5, 5, 5]
+
+        fourth = pipe.run(StubSpider("books_page_ok.html"))
+        assert fourth.report.baseline == 5.0
+        assert fourth.report.yield_ratio == 1.0
+
+    def test_breakage_is_still_caught_on_a_deduplicated_source(self, pipeline):
+        pipe, _ = pipeline
+        for _ in range(3):
+            pipe.run(StubSpider("books_page_ok.html"))
+        broken = pipe.run(StubSpider("books_page_empty.html"))
+        assert not broken.ok
+        assert broken.report.severity is Severity.CRITICAL
+
+    def test_fingerprint_ignores_run_metadata(self):
+        from scraper_pipeline.storage import fingerprint
+
+        a = {"title": "X", "price": "1.00", "scraped_at": "2026-01-01T00:00:00Z"}
+        b = {"title": "X", "price": "1.00", "scraped_at": "2026-06-30T12:00:00Z"}
+        assert fingerprint(a) == fingerprint(b)
+
+    def test_fingerprint_still_distinguishes_real_changes(self):
+        from scraper_pipeline.storage import fingerprint
+
+        a = {"title": "X", "price": "1.00"}
+        b = {"title": "X", "price": "2.00"}
+        assert fingerprint(a) != fingerprint(b)

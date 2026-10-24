@@ -39,6 +39,7 @@ class RunResult:
     run_id: str
     source: str
     stored: int
+    seen: int
     rejected: int
     pages: int
     report: DriftReport
@@ -133,6 +134,7 @@ class Pipeline:
         self.repo.finish_run(
             run_id,
             items_stored=stored,
+            items_seen=len(raw_items),
             items_rejected=len(rejects),
             pages_fetched=pages,
             status=status,
@@ -145,6 +147,7 @@ class Pipeline:
             run_id=run_id,
             source=spider.name,
             stored=stored,
+            seen=len(raw_items),
             rejected=len(rejects),
             pages=pages,
             status=status,
@@ -156,4 +159,6 @@ class Pipeline:
             elif finding.severity is Severity.WARNING:
                 log.warning("drift", code=finding.code, message=finding.message, **finding.detail)
 
-        return RunResult(run_id, spider.name, stored, len(rejects), pages, report, duration)
+        return RunResult(
+            run_id, spider.name, stored, len(raw_items), len(rejects), pages, report, duration
+        )

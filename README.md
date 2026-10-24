@@ -171,7 +171,7 @@ Three tables, plus the HTML archive on disk.
 
 | Table | Holds |
 |---|---|
-| `items` | Validated records as JSON, with a SHA-256 fingerprint so re-runs do not duplicate |
+| `items` | Validated records as JSON, deduplicated by a SHA-256 fingerprint of the record excluding run metadata |
 | `dead_letters` | Records that failed validation, with the error, kept for replay after a fix |
 | `runs` | One audit row per run: counts, duration, status, yield ratio, and what the monitor found |
 
@@ -179,11 +179,19 @@ Three tables, plus the HTML archive on disk.
 items       run_id, source, fingerprint, payload (JSON), scraped_at
 dead_letters run_id, source, source_url, raw (JSON), error, rejected_at
 runs        run_id, source, started_at, finished_at, items_stored,
-            items_rejected, pages_fetched, status, yield_ratio, notes
+            items_seen, items_rejected, pages_fetched, status,
+            yield_ratio, notes
 ```
 
 Records that fail validation never reach `items`. That matters: a half-parsed
 row is worse than a missing one, because something downstream will trust it.
+
+`items_stored` and `items_seen` are deliberately separate. Stored counts rows
+written, which falls to zero once a source stops changing. Seen counts records
+parsed, and is what the baseline is built from, because the question the monitor
+asks is whether the scraper still extracts what it used to, not whether the
+source published anything new. Conflating the two disables yield monitoring on
+exactly the stable sources it suits best.
 
 SQLite by default so it runs with no setup, PostgreSQL through `DATABASE_URL`.
 Both go through SQLAlchemy, so the schema is identical either way.
@@ -207,6 +215,25 @@ makes the monitoring behaviour easy to follow.
 
 The spider layer is pluggable: pointing this at another source is a `Spider`
 subclass and a Pydantic model, not a rewrite.
+
+## What this does not do
+
+Honest scope. This is built around detecting breakage, and several things a
+production scraping operation needs are deliberately absent:
+
+| Not implemented | Needed for |
+|---|---|
+| Authentication, sessions, token refresh | Any source behind a login |
+| Proxy pools and IP rotation | Price intelligence and anything at scale |
+| Concurrency | Throughput. Fetching is sequential, one URL at a time |
+| Link following and a crawl frontier | Discovery. `urls()` is a fixed list per source |
+| Incremental and delta scraping | Large sources where a full re-scrape is wasteful |
+| CAPTCHA and bot-detection handling | Hostile targets |
+| Distributed workers | Horizontal scale |
+
+Adding authentication is the smallest of these: the `Fetcher` already owns a
+persistent `httpx.Client`, so a session and a token-refresh hook fit without
+restructuring anything.
 
 ## Licence
 
