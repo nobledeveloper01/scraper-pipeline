@@ -25,13 +25,18 @@ from .metrics import (
     RUN_DURATION,
     YIELD_RATIO,
 )
-from .models import Book, PythonJob, Quote, RejectedItem
+from .models import Book, Listing, PythonJob, Quote, RejectedItem
 from .spiders.base import Fetcher, Spider
 from .storage import Repository, SnapshotArchive
 
 log = structlog.get_logger()
 
-SCHEMAS = {"books": Book, "quotes_js": Quote, "pyjobs": PythonJob}
+SCHEMAS = {
+    "books": Book,
+    "quotes_js": Quote,
+    "pyjobs": PythonJob,
+    "listings": Listing,
+}
 
 
 @dataclass
@@ -64,7 +69,7 @@ class Pipeline:
     def run(self, spider: Spider) -> RunResult:
         run_id = str(uuid.uuid4())
         started = time.monotonic()
-        fetcher = self._fetcher or Fetcher(spider.name)
+        fetcher = self._fetcher or Fetcher(spider.name, auth=spider.auth())
         schema = SCHEMAS[spider.name]
 
         self.repo.start_run(run_id, spider.name)

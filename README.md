@@ -12,8 +12,8 @@ process.
 
 ## What it does
 
-- Scrapes three sources: a static page, a client-side rendered page, and a real
-  production site.
+- Scrapes four sources: a static page, a client-side rendered page, a real
+  production site, and an authenticated JSON API.
 - Validates every record against a schema, and keeps the failures instead of
   dropping them.
 - Compares each run against what that source normally produces, and fails the run
@@ -46,6 +46,7 @@ uv venv && uv pip install -e ".[dev]"
 scraper run books --pages 2      # static HTML source
 scraper run quotes_js --pages 2  # client-side rendered source
 scraper run pyjobs               # real production site
+scraper run listings             # authenticated JSON API
 scraper health                   # staleness per source
 ```
 
@@ -81,6 +82,56 @@ site while you iterate.
 
 The full procedure is in [docs/layout-change-playbook.md](docs/layout-change-playbook.md).
 
+## Authenticated sources
+
+Most data worth scraping is behind a login, so this is handled as a normal case
+rather than an extra.
+
+```python
+class ListingsSpider(Spider):
+    name = "listings"
+
+    def auth(self):
+        return BearerTokenAuth.from_env(
+            "LISTINGS",
+            login_url=f"{self.base_url}/auth/login",
+            refresh_url=f"{self.base_url}/auth/refresh",
+            session_file=".sessions/listings.json",
+        )
+```
+
+```bash
+export LISTINGS_BASE_URL=http://127.0.0.1:3000
+export LISTINGS_USERNAME=... LISTINGS_PASSWORD=...
+scraper run listings
+```
+
+The behaviours that matter in production, each with a test:
+
+- **Log in once per run, not per page.** Re-authenticating on every request is
+  the fastest way to get an account flagged.
+- **Refresh on a 401, retry once, then stop.** Tokens expire mid-run. The
+  request that discovers it recovers; it does not retry into a loop against a
+  server that is refusing the credentials.
+- **Bad credentials fail immediately.** No retry path, because repeated
+  attempts are what trigger lockouts.
+- **Sessions persist across runs**, in a file written `0600`, so a restart does
+  not mean a fresh login.
+- **Refresh falls back to a full login** when the refresh token is rejected.
+- **A 200 that sets no session cookie is treated as a failure.** A login page
+  re-rendered with an error returns 200, and reading the status code alone is a
+  classic way to scrape a login screen for an hour.
+- **Tokens never reach the logs.** There is a test asserting it.
+- **Credentials come from the environment**, never from the spider file.
+
+Losing access raises rather than recording an empty run. An auth failure that
+looks like "the source had no data" is how silent data loss starts.
+
+`BearerTokenAuth` covers JSON APIs including NestJS services; `CookieAuth`
+covers form logins. Both are tested against a real JWT server started by the
+suite (`tests/authserver.py`), not mocked, because expiry and rejected refresh
+can only be exercised on a server you control.
+
 ## Monitoring
 
 Prometheus metrics on `:9100` with `--metrics`. The ones that matter:
@@ -107,7 +158,9 @@ src/scraper_pipeline/
 │   ├── base.py       fetching, retries, rate limiting, robots.txt
 │   ├── books.py      static HTML via BeautifulSoup
 │   ├── quotes_js.py  client-side rendered, with a Playwright fallback
-│   └── pyjobs.py     a real production page with awkward markup
+│   ├── pyjobs.py     a real production page with awkward markup
+│   └── listings.py   an authenticated JSON API
+├── auth.py           bearer token and cookie login, refresh, session reuse
 ├── models.py         Pydantic schemas; validation is the first tripwire
 ├── drift.py          yield and null-rate analysis
 ├── storage.py        SQLAlchemy persistence and the HTML archive
@@ -223,17 +276,12 @@ production scraping operation needs are deliberately absent:
 
 | Not implemented | Needed for |
 |---|---|
-| Authentication, sessions, token refresh | Any source behind a login |
 | Proxy pools and IP rotation | Price intelligence and anything at scale |
 | Concurrency | Throughput. Fetching is sequential, one URL at a time |
 | Link following and a crawl frontier | Discovery. `urls()` is a fixed list per source |
 | Incremental and delta scraping | Large sources where a full re-scrape is wasteful |
 | CAPTCHA and bot-detection handling | Hostile targets |
 | Distributed workers | Horizontal scale |
-
-Adding authentication is the smallest of these: the `Fetcher` already owns a
-persistent `httpx.Client`, so a session and a token-refresh hook fit without
-restructuring anything.
 
 ## Licence
 

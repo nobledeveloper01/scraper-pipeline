@@ -18,8 +18,9 @@ import httpx
 import structlog
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from ..auth import AuthError, AuthStrategy, NoAuth
 from ..config import settings
-from ..metrics import FETCH_ERRORS, PAGES_FETCHED, status_class
+from ..metrics import AUTH_FAILURES, AUTH_REFRESHES, FETCH_ERRORS, PAGES_FETCHED, status_class
 
 log = structlog.get_logger()
 
@@ -31,15 +32,38 @@ class RobotsDisallowed(RuntimeError):
 class Fetcher:
     """HTTP client with retries, rate limiting and robots.txt enforcement."""
 
-    def __init__(self, source: str, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        source: str,
+        client: httpx.Client | None = None,
+        auth: AuthStrategy | None = None,
+    ) -> None:
         self.source = source
         self._client = client or httpx.Client(
             headers={"User-Agent": settings.user_agent},
             timeout=settings.request_timeout,
             follow_redirects=True,
         )
+        self.auth = auth or NoAuth()
+        self._authenticated = False
         self._robots: dict[str, urllib.robotparser.RobotFileParser] = {}
         self._last_request_at: float = 0.0
+
+    def _ensure_authenticated(self) -> None:
+        """Log in once, lazily, and pre-emptively renew a token about to expire.
+
+        Lazily so that constructing a Fetcher never performs network I/O, which
+        keeps tests and `--help` fast. Pre-emptively because discovering expiry
+        through a 401 costs an extra round trip on every page near the boundary.
+        """
+        if isinstance(self.auth, NoAuth):
+            return
+        if not self._authenticated:
+            self.auth.authenticate(self._client)
+            self._authenticated = True
+        elif self.auth.is_expired():
+            log.info("auth_token_expiring", source=self.source)
+            self.auth.refresh(self._client)
 
     def _robots_for(self, url: str) -> urllib.robotparser.RobotFileParser | None:
         parsed = urlparse(url)
@@ -84,6 +108,9 @@ class Fetcher:
     def get(self, url: str) -> httpx.Response:
         if not self.allowed(url):
             raise RobotsDisallowed(f"robots.txt disallows {url}")
+
+        self._ensure_authenticated()
+
         try:
             resp = self._request(url)
         except httpx.TimeoutException:
@@ -92,6 +119,21 @@ class Fetcher:
         except httpx.ConnectError:
             FETCH_ERRORS.labels(self.source, "connect").inc()
             raise
+
+        # A token can expire mid-run. Refresh and retry exactly once: enough to
+        # recover, not enough to hammer a server that is refusing us.
+        if resp.status_code == 401 and not isinstance(self.auth, NoAuth):
+            PAGES_FETCHED.labels(self.source, status_class(resp.status_code)).inc()
+            AUTH_REFRESHES.labels(self.source).inc()
+            log.info("auth_401_refreshing", source=self.source, url=url)
+            if not self.auth.refresh(self._client):
+                AUTH_FAILURES.labels(self.source).inc()
+                raise AuthError(f"401 on {url} and re-authentication failed")
+            resp = self._request(url)
+            if resp.status_code == 401:
+                AUTH_FAILURES.labels(self.source).inc()
+                raise AuthError(f"still 401 on {url} after refreshing")
+
         PAGES_FETCHED.labels(self.source, status_class(resp.status_code)).inc()
         resp.raise_for_status()
         return resp
@@ -105,6 +147,10 @@ class Spider(ABC):
 
     name: str
     nullable_fields: set[str] = set()
+
+    def auth(self) -> AuthStrategy:
+        """Override to make this source authenticated. Public by default."""
+        return NoAuth()
 
     @abstractmethod
     def urls(self) -> Iterator[str]:

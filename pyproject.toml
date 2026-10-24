@@ -41,7 +41,7 @@ packages = ["src/scraper_pipeline"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 addopts = "-q"
 
 [tool.ruff]

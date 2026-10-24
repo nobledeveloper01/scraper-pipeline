@@ -89,3 +89,14 @@ class PythonJob(ScrapedItem):
         if not cleaned:
             raise ValueError("field collapsed to empty after whitespace normalisation")
         return cleaned
+
+
+class Listing(ScrapedItem):
+    """A property listing from an authenticated JSON API."""
+
+    reference: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=400)
+    price: Decimal = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    bedrooms: int | None = Field(default=None, ge=0, le=50)
+    listing_type: str = Field(min_length=1, max_length=32)

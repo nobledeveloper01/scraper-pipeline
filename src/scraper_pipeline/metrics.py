@@ -66,3 +66,17 @@ def serve_metrics(port: int) -> None:
 def status_class(code: int) -> str:
     """Bucket a status code so the label stays low cardinality."""
     return f"{code // 100}xx"
+
+
+AUTH_REFRESHES = Counter(
+    "scraper_auth_refreshes_total",
+    "Times a 401 mid-run forced a token refresh. A rising rate means the token "
+    "lifetime is shorter than the run.",
+    ["source"],
+)
+
+AUTH_FAILURES = Counter(
+    "scraper_auth_failures_total",
+    "Times re-authentication failed. Usually rotated or revoked credentials.",
+    ["source"],
+)
