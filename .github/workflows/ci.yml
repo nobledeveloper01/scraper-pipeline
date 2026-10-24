@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Daily run against the live sites. This is the point: it is how we find out
+    # a source changed its layout before it matters, rather than after.
+    - cron: "0 6 * * *"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests
+      - run: pytest --cov=scraper_pipeline --cov-report=term-missing
+
+  live-check:
+    # Scheduled only. Pull requests must not depend on a third-party site being
+    # up, or the suite goes red for reasons that have nothing to do with the PR.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: Scrape the live sources and fail on drift
+        run: |
+          scraper run books --pages 2
+          scraper run quotes_js --pages 2 --no-browser
