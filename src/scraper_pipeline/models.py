@@ -71,3 +71,21 @@ class RejectedItem(BaseModel):
     error: str
     run_id: str
     rejected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class PythonJob(ScrapedItem):
+    """A job posting from a real production page."""
+
+    title: str = Field(min_length=1, max_length=300)
+    company: str = Field(min_length=1, max_length=200)
+    location: str | None = Field(default=None, max_length=200)
+    job_types: list[str] = Field(default_factory=list)
+    listing_url: HttpUrl
+
+    @field_validator("title", "company")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        cleaned = " ".join(v.split())
+        if not cleaned:
+            raise ValueError("field collapsed to empty after whitespace normalisation")
+        return cleaned

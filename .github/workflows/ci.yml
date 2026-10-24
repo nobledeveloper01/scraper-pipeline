@@ -40,3 +40,4 @@ jobs:
         run: |
           scraper run books --pages 2
           scraper run quotes_js --pages 2 --no-browser
+          scraper run pyjobs --pages 1

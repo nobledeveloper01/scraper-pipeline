@@ -25,13 +25,13 @@ from .metrics import (
     RUN_DURATION,
     YIELD_RATIO,
 )
-from .models import Book, Quote, RejectedItem
+from .models import Book, PythonJob, Quote, RejectedItem
 from .spiders.base import Fetcher, Spider
 from .storage import Repository, SnapshotArchive
 
 log = structlog.get_logger()
 
-SCHEMAS = {"books": Book, "quotes_js": Quote}
+SCHEMAS = {"books": Book, "quotes_js": Quote, "pyjobs": PythonJob}
 
 
 @dataclass

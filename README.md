@@ -12,7 +12,8 @@ process.
 
 ## What it does
 
-- Scrapes two sources, one server-rendered and one rendered in the browser.
+- Scrapes three sources: a static page, a client-side rendered page, and a real
+  production site.
 - Validates every record against a schema, and keeps the failures instead of
   dropping them.
 - Compares each run against what that source normally produces, and fails the run
@@ -44,6 +45,7 @@ uv venv && uv pip install -e ".[dev]"
 
 scraper run books --pages 2      # static HTML source
 scraper run quotes_js --pages 2  # client-side rendered source
+scraper run pyjobs               # real production site
 scraper health                   # staleness per source
 ```
 
@@ -104,7 +106,8 @@ src/scraper_pipeline/
 ├── spiders/          one class per source: urls() and parse()
 │   ├── base.py       fetching, retries, rate limiting, robots.txt
 │   ├── books.py      static HTML via BeautifulSoup
-│   └── quotes_js.py  client-side rendered, with a Playwright fallback
+│   ├── quotes_js.py  client-side rendered, with a Playwright fallback
+│   └── pyjobs.py     a real production page with awkward markup
 ├── models.py         Pydantic schemas; validation is the first tripwire
 ├── drift.py          yield and null-rate analysis
 ├── storage.py        SQLAlchemy persistence and the HTML archive
@@ -162,13 +165,48 @@ pytest
 deliberately altered page, so a selector cannot break silently. When the real
 site changes, the fix starts by adding the new HTML as a fixture.
 
+## How the data is stored
+
+Three tables, plus the HTML archive on disk.
+
+| Table | Holds |
+|---|---|
+| `items` | Validated records as JSON, with a SHA-256 fingerprint so re-runs do not duplicate |
+| `dead_letters` | Records that failed validation, with the error, kept for replay after a fix |
+| `runs` | One audit row per run: counts, duration, status, yield ratio, and what the monitor found |
+
+```
+items       run_id, source, fingerprint, payload (JSON), scraped_at
+dead_letters run_id, source, source_url, raw (JSON), error, rejected_at
+runs        run_id, source, started_at, finished_at, items_stored,
+            items_rejected, pages_fetched, status, yield_ratio, notes
+```
+
+Records that fail validation never reach `items`. That matters: a half-parsed
+row is worse than a missing one, because something downstream will trust it.
+
+SQLite by default so it runs with no setup, PostgreSQL through `DATABASE_URL`.
+Both go through SQLAlchemy, so the schema is identical either way.
+
+Alongside the database, every fetched page is written to
+`snapshots/<source>/<run_id>/` with a manifest mapping files back to URLs. That
+archive is what makes `scraper diff` possible.
+
 ## Targets, and why these ones
 
-`books.toscrape.com` and `quotes.toscrape.com` are published for this purpose, so
-CI is reliable and nobody's terms of service are being bent to make a portfolio
-piece. The spider layer is pluggable: pointing this at a commercial source is a
-new `Spider` subclass and a schema, not a rewrite. The engineering here is the
-monitoring and the recovery path, and neither depends on which site is behind it.
+`pyjobs` scrapes `www.python.org/jobs`, a real production page, checked against
+its `robots.txt` before each run. It is the useful one to read: the company name
+has no element of its own, it is a loose text node sitting after an anchor and a
+`<br/>` with a stray tab in it, so the parser has to work from the surrounding
+structure instead of a selector. That is what real markup is like.
+
+`books.toscrape.com` and `quotes.toscrape.com` are published for scraping
+practice. They are here because CI needs targets that are reliable and whose
+terms are not being bent to make a portfolio piece, and because their tidy HTML
+makes the monitoring behaviour easy to follow.
+
+The spider layer is pluggable: pointing this at another source is a `Spider`
+subclass and a Pydantic model, not a rewrite.
 
 ## Licence
 
